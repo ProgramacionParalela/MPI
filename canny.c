@@ -37,8 +37,9 @@ Mike Heath
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include "mpi.h"
 
-#define VERBOSE 0
+#define VERBOSE 1
 #define BOOSTBLURFACTOR 90.0
 
 int read_pgm_image(char *infilename, unsigned char **image, int *rows,
@@ -63,6 +64,7 @@ double angle_radians(double x, double y);
 
 int main(int argc, char *argv[])
 {
+	double tini, tfin;
    char *infilename = NULL;  /* Name of the input image */
    char *dirfilename = NULL; /* Name of the output gradient direction image */
    char outfilename[128];    /* Name of the output "edge" image */
@@ -107,6 +109,8 @@ int main(int argc, char *argv[])
    if(argc == 6) dirfilename = infilename;
    else dirfilename = NULL;
 
+	MPI_Init (&argc, &argv);
+	tini = MPI_Wtime ();
    /****************************************************************************
    * Read in the image. This read function allocates memory for the image.
    ****************************************************************************/
@@ -138,6 +142,9 @@ int main(int argc, char *argv[])
       exit(1);
    }
    free(image);
+   tfin = MPI_Wtime ();
+   MPI_Finalize ();
+   printf ("-----------------------------\nDemoro: %f\n", tfin-tini);
    return 0;
 }
 
@@ -316,8 +323,10 @@ double angle_radians(double x, double y)
 void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
         short int **magnitude)
 {
+	double tini2, tfin2;
    int r, c, pos, sq1, sq2;
 
+	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Allocate an image to store the magnitude of the gradient.
    ****************************************************************************/
@@ -333,7 +342,8 @@ void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
          (*magnitude)[pos] = (short)(0.5 + sqrt((float)sq1 + (float)sq2));
       }
    }
-
+	tfin2 = MPI_Wtime ();
+    printf ("----------------------> magnitude_x_y demoro: %f\n", tfin2 - tini2);
 }
 
 /*******************************************************************************
@@ -351,8 +361,10 @@ void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
 void derrivative_x_y(short int *smoothedim, int rows, int cols,
         short int **delta_x, short int **delta_y)
 {
+	double tini2, tfin2;
    int r, c, pos;
 
+	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Allocate images to store the derivatives.
    ****************************************************************************/
@@ -394,6 +406,8 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
       }
       (*delta_y)[pos] = smoothedim[pos] - smoothedim[pos-cols];
    }
+   tfin2 = MPI_Wtime ();
+   printf ("----------------------> derrivative_x_y demoro: %f\n", tfin2 - tini2);
 }
 
 /*******************************************************************************
@@ -405,6 +419,7 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
 void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
         short int **smoothedim)
 {
+	double tini2, tfin2;
    int r, c, rr, cc,     /* Counter variables. */
       windowsize,        /* Dimension of the gaussian kernel. */
       center;            /* Half of the windowsize. */
@@ -413,6 +428,7 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
          dot,            /* Dot product summing variable. */
          sum;            /* Sum of the kernel weights variable. */
 
+	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Create a 1-dimensional gaussian smoothing kernel.
    ****************************************************************************/
@@ -471,6 +487,8 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
 
    free(tempim);
    free(kernel);
+   tfin2 = MPI_Wtime ();
+   printf ("----------------------> gaussian_smooth demoro: %f\n", tfin2 - tini2);
 }
 
 /*******************************************************************************
@@ -566,10 +584,12 @@ void follow_edges(unsigned char *edgemapptr, short *edgemagptr, short lowval,
 void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
 	float tlow, float thigh, unsigned char *edge)
 {
+	double tini2, tfin2;
    int r, c, pos, numedges, lowcount, highcount, lowthreshold, highthreshold,
        i, hist[32768], rr, cc;
    short int maximum_mag, sumpix;
 
+	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Initialize the edge map to possible edges everywhere the non-maximal
    * suppression suggested there could be an edge except for the border. At
@@ -660,6 +680,8 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    for(r=0,pos=0;r<rows;r++){
       for(c=0;c<cols;c++,pos++) if(edge[pos] != EDGE) edge[pos] = NOEDGE;
    }
+   tfin2 = MPI_Wtime ();
+   printf ("----------------------> apply_hysteresis demoro: %f\n", tfin2 - tini2);
 }
 
 /*******************************************************************************
@@ -672,6 +694,7 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
 void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
     unsigned char *result) 
 {
+	double tini2, tfin2;
     int rowcount, colcount,count;
     short *magrowptr,*magptr;
     short *gxrowptr,*gxptr;
@@ -680,7 +703,7 @@ void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
     float mag1,mag2,xperp,yperp;
     unsigned char *resultrowptr, *resultptr;
     
-
+	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Zero the edges of the result image.
    ****************************************************************************/
@@ -866,6 +889,8 @@ void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
             }
         } 
     }
+    tfin2 = MPI_Wtime ();
+    printf ("----------------------> non_max_supp demoro: %f\n", tfin2 - tini2);
 }
 //<------------------------- end hysteresis.c ------------------------->
 
