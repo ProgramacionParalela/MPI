@@ -180,22 +180,22 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
    int r, c, pos;
    float *dir_radians=NULL;   /* Gradient direction image.                */
    
-	if (rank == 0) {
-	   /****************************************************************************
-	   * Perform gaussian smoothing on the image using the input standard
-	   * deviation.
-	   ****************************************************************************/
-	   if(VERBOSE) printf("Smoothing the image using a gaussian kernel.\n");
-	}
+   /****************************************************************************
+   * Perform gaussian smoothing on the image using the input standard
+   * deviation.
+   ****************************************************************************/
+   if(VERBOSE && rank==0) printf("Smoothing the image using a gaussian kernel.\n");
 	MPI_Barrier (MPI_COMM_WORLD);
 	gaussian_smooth(image, rows, cols, sigma, &smoothedim);
-	if (rank == 0) {
-	   /****************************************************************************
-	   * Compute the first derivative in the x and y directions.
-	   ****************************************************************************/
-	   if(VERBOSE) printf("Computing the X and Y first derivatives.\n");
-	   derrivative_x_y(smoothedim, rows, cols, &delta_x, &delta_y);
 	
+   /****************************************************************************
+   * Compute the first derivative in the x and y directions.
+   ****************************************************************************/
+   if(VERBOSE && rank==0) printf("Computing the X and Y first derivatives.\n");
+   MPI_Barrier (MPI_COMM_WORLD);
+   derrivative_x_y(smoothedim, rows, cols, &delta_x, &delta_y);
+	
+	if (rank == 0) {
 	   /****************************************************************************
 	   * This option to write out the direction of the edge gradient was added
 	   * to make the information available for computing an edge quality figure
@@ -378,9 +378,14 @@ void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
 void derrivative_x_y(short int *smoothedim, int rows, int cols,
         short int **delta_x, short int **delta_y)
 {
+	double tini3, tfin3, tini4, tfin4;	/* para medir tiempos de funciones */
+	short int * tempbuffer;				/* buffer temporal para x-derivative */
+	short int * tempbuffer2;			/* buffer temporal para y-derivative */
    int r, c, pos;
 
-	tini2 = MPI_Wtime ();
+	if (rank == 0) {
+		tini2 = MPI_Wtime ();
+	}
    /****************************************************************************
    * Allocate images to store the derivatives.
    ****************************************************************************/
@@ -392,38 +397,77 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
       fprintf(stderr, "Error allocating the delta_x image.\n");
       exit(1);
    }
+   /* memoria para buffer temporal */
+   if((tempbuffer = (short *) calloc(rows*cols/size, sizeof(short))) == NULL){
+      fprintf(stderr, "Error allocating the tempbuffer.\n");
+      exit(1);
+   }
+   if((tempbuffer2 = (short *) calloc(rows*cols, sizeof(short))) == NULL){
+      fprintf(stderr, "Error allocating the tempbuffer2.\n");
+      exit(1);
+   }
 
-   /****************************************************************************
-   * Compute the x-derivative. Adjust the derivative at the borders to avoid
-   * losing pixels.
-   ****************************************************************************/
-   if(VERBOSE) printf("   Computing the X-direction derivative.\n");
-   for(r=0;r<rows;r++){
+	if (rank == 0) {
+		tini3 = MPI_Wtime ();
+	   /****************************************************************************
+	   * Compute the x-derivative. Adjust the derivative at the borders to avoid
+	   * losing pixels.
+	   ****************************************************************************/
+	   if(VERBOSE) printf("   Computing the X-direction derivative.\n");
+   }
+   for (r=rank*rows/size;r<(rank+1)*rows/size;r++) {
       pos = r * cols;
-      (*delta_x)[pos] = smoothedim[pos+1] - smoothedim[pos];
+      tempbuffer [pos] = smoothedim[pos+1] - smoothedim[pos];
       pos++;
       for(c=1;c<(cols-1);c++,pos++){
-         (*delta_x)[pos] = smoothedim[pos+1] - smoothedim[pos-1];
+         tempbuffer [pos] = smoothedim[pos+1] - smoothedim[pos-1];
       }
-      (*delta_x)[pos] = smoothedim[pos] - smoothedim[pos-1];
+      tempbuffer [pos] = smoothedim[pos] - smoothedim[pos-1];
+   }
+   printf (">rank:%d termino derivative x\n", rank);
+   MPI_Barrier (MPI_COMM_WORLD);
+   if (rank == 0) tini4 = MPI_Wtime ();
+   MPI_Allgather (tempbuffer, rows*cols/size, MPI_SHORT, *delta_x, rows*cols/size, MPI_SHORT, MPI_COMM_WORLD);
+   
+   if (rank == 0) {
+	   tfin3 = MPI_Wtime ();
+	   printf (">>>Allgather demoro: %f\n", tfin3 - tini4);
+	   printf (">>>Derivative x demoro: %f\n", tfin3 - tini3);
    }
 
-   /****************************************************************************
-   * Compute the y-derivative. Adjust the derivative at the borders to avoid
-   * losing pixels.
-   ****************************************************************************/
-   if(VERBOSE) printf("   Computing the Y-direction derivative.\n");
-   for(c=0;c<cols;c++){
+	if (rank == 0) {
+		tini3 = MPI_Wtime ();
+	   /****************************************************************************
+	   * Compute the y-derivative. Adjust the derivative at the borders to avoid
+	   * losing pixels.
+	   ****************************************************************************/
+	   if(VERBOSE) printf("   Computing the Y-direction derivative.\n");
+   }
+   for (c=rank*cols/size;c<(rank+1)*cols/size;c++) {
       pos = c;
-      (*delta_y)[pos] = smoothedim[pos+cols] - smoothedim[pos];
+      tempbuffer2 [pos] = smoothedim[pos+cols] - smoothedim[pos];
       pos += cols;
       for(r=1;r<(rows-1);r++,pos+=cols){
-         (*delta_y)[pos] = smoothedim[pos+cols] - smoothedim[pos-cols];
+         tempbuffer2 [pos] = smoothedim[pos+cols] - smoothedim[pos-cols];
       }
-      (*delta_y)[pos] = smoothedim[pos] - smoothedim[pos-cols];
+      tempbuffer2 [pos] = smoothedim[pos] - smoothedim[pos-cols];
    }
-   tfin2 = MPI_Wtime ();
-   printf ("----------------------> derrivative_x_y demoro: %f\n", tfin2 - tini2);
+   printf (">rank:%d termino derivative y\n", rank);
+   MPI_Barrier (MPI_COMM_WORLD);
+   if (rank == 0) tini4 = MPI_Wtime ();
+   MPI_Allreduce (tempbuffer2, *delta_y, rows*cols, MPI_SHORT, MPI_SUM, MPI_COMM_WORLD);
+   
+   if (rank == 0) {
+	   tfin3 = MPI_Wtime ();
+	   printf (">>>Allreduce demoro: %f\n", tfin3 - tini4);
+	   printf (">>>Derivative y demoro: %f\n", tfin3 - tini3);
+   }
+   if (rank == 0) {
+	   tfin2 = MPI_Wtime ();
+	   printf ("----------------------> derrivative_x_y demoro: %f\n", tfin2 - tini2);
+   }
+   free (tempbuffer);
+   free (tempbuffer2);
 }
 
 /*******************************************************************************
@@ -500,7 +544,7 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
       }
       index ++;
    }
-   printf ("rank:%d termino blur x\n", rank);
+   printf (">rank:%d termino blur x\n", rank);
    MPI_Barrier (MPI_COMM_WORLD);
    if (rank == 0) tini4 = MPI_Wtime ();
    MPI_Allgather (tempbuffer, rows*cols/size, MPI_FLOAT, tempim, rows*cols/size, MPI_FLOAT, MPI_COMM_WORLD);
@@ -530,7 +574,7 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
          tempbuffer2[r*cols+c] = (short int)(dot*BOOSTBLURFACTOR/sum + 0.5);
       }
    }
-   printf ("rank:%d termino blur y\n", rank);
+   printf (">rank:%d termino blur y\n", rank);
    MPI_Barrier (MPI_COMM_WORLD);
    if (rank == 0) tini4 = MPI_Wtime ();
    MPI_Allreduce (tempbuffer2, *smoothedim, rows*cols, MPI_SHORT, MPI_SUM, MPI_COMM_WORLD);
