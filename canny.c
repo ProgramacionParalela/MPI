@@ -87,46 +87,50 @@ int main(int argc, char *argv[])
 	MPI_Init (&argc, &argv);
 	MPI_Comm_size (MPI_COMM_WORLD, &size);
 	MPI_Comm_rank (MPI_COMM_WORLD, &rank);
+	
+	/* todos los hilos obtienen sus variables como asi tambien el espacio en memoria */
+   /****************************************************************************
+   * Get the command line arguments.
+   ****************************************************************************/
+   if(argc < 5){
+   fprintf(stderr,"\n<USAGE> %s image sigma tlow thigh [writedirim]\n",argv[0]);
+      fprintf(stderr,"\n      image:      An image to process. Must be in ");
+      fprintf(stderr,"PGM format.\n");
+      fprintf(stderr,"      sigma:      Standard deviation of the gaussian");
+      fprintf(stderr," blur kernel.\n");
+      fprintf(stderr,"      tlow:       Fraction (0.0-1.0) of the high ");
+      fprintf(stderr,"edge strength threshold.\n");
+      fprintf(stderr,"      thigh:      Fraction (0.0-1.0) of the distribution");
+      fprintf(stderr," of non-zero edge\n                  strengths for ");
+      fprintf(stderr,"hysteresis. The fraction is used to compute\n");
+      fprintf(stderr,"                  the high edge strength threshold.\n");
+      fprintf(stderr,"      writedirim: Optional argument to output ");
+      fprintf(stderr,"a floating point");
+      fprintf(stderr," direction image.\n\n");
+      exit(1);
+   }
+
+   infilename = argv[1];
+   sigma = atof(argv[2]);
+   tlow = atof(argv[3]);
+   thigh = atof(argv[4]);
+
+   if(argc == 6) dirfilename = infilename;
+   else dirfilename = NULL;
+	
 	if (rank == 0) {
-	   /****************************************************************************
-	   * Get the command line arguments.
-	   ****************************************************************************/
-	   if(argc < 5){
-	   fprintf(stderr,"\n<USAGE> %s image sigma tlow thigh [writedirim]\n",argv[0]);
-	      fprintf(stderr,"\n      image:      An image to process. Must be in ");
-	      fprintf(stderr,"PGM format.\n");
-	      fprintf(stderr,"      sigma:      Standard deviation of the gaussian");
-	      fprintf(stderr," blur kernel.\n");
-	      fprintf(stderr,"      tlow:       Fraction (0.0-1.0) of the high ");
-	      fprintf(stderr,"edge strength threshold.\n");
-	      fprintf(stderr,"      thigh:      Fraction (0.0-1.0) of the distribution");
-	      fprintf(stderr," of non-zero edge\n                  strengths for ");
-	      fprintf(stderr,"hysteresis. The fraction is used to compute\n");
-	      fprintf(stderr,"                  the high edge strength threshold.\n");
-	      fprintf(stderr,"      writedirim: Optional argument to output ");
-	      fprintf(stderr,"a floating point");
-	      fprintf(stderr," direction image.\n\n");
-	      exit(1);
-	   }
-	
-	   infilename = argv[1];
-	   sigma = atof(argv[2]);
-	   tlow = atof(argv[3]);
-	   thigh = atof(argv[4]);
-	
-	   if(argc == 6) dirfilename = infilename;
-	   else dirfilename = NULL;
-	
 		tini = MPI_Wtime ();
 	   /****************************************************************************
 	   * Read in the image. This read function allocates memory for the image.
 	   ****************************************************************************/
 	   if(VERBOSE) printf("Reading the image %s.\n", infilename);
-	   if(read_pgm_image(infilename, &image, &rows, &cols) == 0){
-	      fprintf(stderr, "Error reading the input image, %s.\n", infilename);
-	      exit(1);
-	   }
+	}
+   if(read_pgm_image(infilename, &image, &rows, &cols) == 0){
+      fprintf(stderr, "Error reading the input image, %s.\n", infilename);
+      exit(1);
+   }
 	
+	if (rank == 0) {
 	   /****************************************************************************
 	   * Perform the edge detection. All of the work takes place here.
 	   ****************************************************************************/
@@ -137,7 +141,7 @@ int main(int argc, char *argv[])
 	      dirfilename = composedfname;
 	   }
 	}
-   canny(image, rows, cols, sigma, tlow, thigh, &edge, dirfilename);
+	canny(image, rows, cols, sigma, tlow, thigh, &edge, dirfilename);
 
 	if (rank == 0) {
 	   /****************************************************************************
@@ -182,8 +186,10 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
 	   * deviation.
 	   ****************************************************************************/
 	   if(VERBOSE) printf("Smoothing the image using a gaussian kernel.\n");
-	   gaussian_smooth(image, rows, cols, sigma, &smoothedim);
-	
+	}
+	MPI_Barrier (MPI_COMM_WORLD);
+	gaussian_smooth(image, rows, cols, sigma, &smoothedim);
+	if (rank == 0) {
 	   /****************************************************************************
 	   * Compute the first derivative in the x and y directions.
 	   ****************************************************************************/
@@ -429,6 +435,10 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
 void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
         short int **smoothedim)
 {
+	double tini3,tfin3,tini4,tfin4;	/* para medir tiempos de funciones */
+	float *tempbuffer;				/* buffer temporal para blur en x */
+	short int *tempbuffer2;			/* buffer temporal para blur en y */
+	int index;						/* indice usado para acceder a tempbuffer */
    int r, c, rr, cc,     /* Counter variables. */
       windowsize,        /* Dimension of the gaussian kernel. */
       center;            /* Half of the windowsize. */
@@ -436,15 +446,25 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
          *kernel,        /* A one dimensional gaussian kernel. */
          dot,            /* Dot product summing variable. */
          sum;            /* Sum of the kernel weights variable. */
-
-	tini2 = MPI_Wtime ();
-   /****************************************************************************
-   * Create a 1-dimensional gaussian smoothing kernel.
-   ****************************************************************************/
-   if(VERBOSE) printf("   Computing the gaussian smoothing kernel.\n");
+	
+	/* se reserva memoria para el buffer temporal para cada hilo */
+	if ((tempbuffer = (float *) calloc (rows*cols/size, sizeof (float))) == NULL) {
+		fprintf (stderr, "Error allocating the tempbuffer.\n");
+		exit (1);
+	}
+	if ((tempbuffer2 = (short int *) calloc (rows*cols, sizeof (short int))) == NULL) {
+		fprintf (stderr, "Error allocating the tempbuffer2.\n");
+		exit (1);
+	}
+	if (rank == 0) {
+		tini2 = MPI_Wtime ();
+	   /****************************************************************************
+	   * Create a 1-dimensional gaussian smoothing kernel.
+	   ****************************************************************************/
+	   if(VERBOSE) printf("   Computing the gaussian smoothing kernel.\n");
+	}
    make_gaussian_kernel(sigma, &kernel, &windowsize);
    center = windowsize / 2;
-
    /****************************************************************************
    * Allocate a temporary buffer image and the smoothed image.
    ****************************************************************************/
@@ -456,13 +476,17 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
          sizeof(short int))) == NULL){
       fprintf(stderr, "Error allocating the smoothed image.\n");
       exit(1);
-   }
-
-   /****************************************************************************
-   * Blur in the x - direction.
-   ****************************************************************************/
-   if(VERBOSE) printf("   Bluring the image in the X-direction.\n");
-   for(r=0;r<rows;r++){
+	}
+	if (rank == 0) {
+	   /****************************************************************************
+	   * Blur in the x - direction.
+	   ****************************************************************************/
+	   if(VERBOSE) printf("   Bluring the image in the X-direction.\n");
+	}
+	MPI_Barrier (MPI_COMM_WORLD);
+	if (rank == 0) tini3 = MPI_Wtime ();
+	index = 0;
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
       for(c=0;c<cols;c++){
          dot = 0.0;
          sum = 0.0;
@@ -472,15 +496,28 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
                sum += kernel[center+cc];
             }
          }
-         tempim[r*cols+c] = dot/sum;
+         tempbuffer[index*cols+c] = dot/sum;
       }
+      index ++;
    }
-
-   /****************************************************************************
-   * Blur in the y - direction.
-   ****************************************************************************/
-   if(VERBOSE) printf("   Bluring the image in the Y-direction.\n");
-   for(c=0;c<cols;c++){
+   printf ("rank:%d termino blur x\n", rank);
+   MPI_Barrier (MPI_COMM_WORLD);
+   if (rank == 0) tini4 = MPI_Wtime ();
+   MPI_Allgather (tempbuffer, rows*cols/size, MPI_FLOAT, tempim, rows*cols/size, MPI_FLOAT, MPI_COMM_WORLD);
+	if (rank == 0) {
+		tfin3 = MPI_Wtime ();
+		printf (">>>Allgather demoro: %f\n", tfin3 - tini4);
+		printf (">>>Blur x demoro: %f\n", tfin3 - tini3);
+	}
+   
+	if (rank == 0) {
+	   /****************************************************************************
+	   * Blur in the y - direction.
+	   ****************************************************************************/
+	   if(VERBOSE) printf("   Bluring the image in the Y-direction.\n");
+	}
+	if (rank == 0) tini3 = MPI_Wtime ();
+   for(c=rank*cols/size;c<(rank+1)*cols/size;c++){
       for(r=0;r<rows;r++){
          sum = 0.0;
          dot = 0.0;
@@ -490,14 +527,27 @@ void gaussian_smooth(unsigned char *image, int rows, int cols, float sigma,
                sum += kernel[center+rr];
             }
          }
-         (*smoothedim)[r*cols+c] = (short int)(dot*BOOSTBLURFACTOR/sum + 0.5);
+         tempbuffer2[r*cols+c] = (short int)(dot*BOOSTBLURFACTOR/sum + 0.5);
       }
    }
+   printf ("rank:%d termino blur y\n", rank);
+   MPI_Barrier (MPI_COMM_WORLD);
+   if (rank == 0) tini4 = MPI_Wtime ();
+   MPI_Allreduce (tempbuffer2, *smoothedim, rows*cols, MPI_SHORT, MPI_SUM, MPI_COMM_WORLD);
+	if (rank == 0) {
+		tfin3 = MPI_Wtime ();
+		printf (">>>Allreduce demoro: %f\n", tfin3 - tini4);
+		printf (">>>Blur y demoro: %f\n", tfin3 - tini3);
+	}
 
    free(tempim);
    free(kernel);
-   tfin2 = MPI_Wtime ();
-   printf ("----------------------> gaussian_smooth demoro: %f\n", tfin2 - tini2);
+   free(tempbuffer);
+   free(tempbuffer2);
+   if (rank == 0) {
+	   tfin2 = MPI_Wtime ();
+	   printf ("----------------------> gaussian_smooth demoro: %f\n", tfin2 - tini2);
+   }
 }
 
 /*******************************************************************************
@@ -514,7 +564,7 @@ void make_gaussian_kernel(float sigma, float **kernel, int *windowsize)
    *windowsize = 1 + 2 * ceil(2.5 * sigma);
    center = (*windowsize) / 2;
 
-   if(VERBOSE) printf("      The kernel has %d elements.\n", *windowsize);
+   if(VERBOSE && rank==0) printf("      The kernel has %d elements.\n", *windowsize);
    if((*kernel = (float *) calloc((*windowsize), sizeof(float))) == NULL){
       fprintf(stderr, "Error callocing the gaussian kernel array.\n");
       exit(1);
@@ -529,7 +579,7 @@ void make_gaussian_kernel(float sigma, float **kernel, int *windowsize)
 
    for(i=0;i<(*windowsize);i++) (*kernel)[i] /= sum;
 
-   if(VERBOSE){
+   if(VERBOSE && rank==0){
       printf("The filter coefficients are:\n");
       for(i=0;i<(*windowsize);i++)
          printf("kernel[%d] = %f\n", i, (*kernel)[i]);
