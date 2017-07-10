@@ -224,7 +224,10 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
 	   * Compute the magnitude of the gradient.
 	   ****************************************************************************/
 	   if(VERBOSE) printf("Computing the magnitude of the gradient.\n");
-	   magnitude_x_y(delta_x, delta_y, rows, cols, &magnitude);
+   }
+   magnitude_x_y(delta_x, delta_y, rows, cols, &magnitude);
+   
+   if (rank == 0 ) {
 	
 	   /****************************************************************************
 	   * Perform non-maximal suppression.
@@ -257,7 +260,7 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
 	   free(delta_y);
 	   free(magnitude);
 	   free(nms);
-	}
+   }
 }
 
 /*******************************************************************************
@@ -341,9 +344,12 @@ double angle_radians(double x, double y)
 void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
         short int **magnitude)
 {
+	int index;					/* indice para acceder a tempbuffer */
+	double tini3, tfin3;		/* para medir tiempos de funciones */
+	short int * tempbuffer;		/* buffer temporal */
    int r, c, pos, sq1, sq2;
 
-	tini2 = MPI_Wtime ();
+	if (rank == 0) tini2 = MPI_Wtime ();
    /****************************************************************************
    * Allocate an image to store the magnitude of the gradient.
    ****************************************************************************/
@@ -351,16 +357,37 @@ void magnitude_x_y(short int *delta_x, short int *delta_y, int rows, int cols,
       fprintf(stderr, "Error allocating the magnitude image.\n");
       exit(1);
    }
+   /* se reserva memoria para el buffer temporal */
+   if((tempbuffer = (short *) calloc(rows*cols/size, sizeof(short))) == NULL){
+      fprintf(stderr, "Error allocating the magnitude image.\n");
+      exit(1);
+   }
 
-   for(r=0,pos=0;r<rows;r++){
-      for(c=0;c<cols;c++,pos++){
+	pos = rank*rows*cols/size;
+	index = 0;
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
+      for(c=0;c<cols;c++){
          sq1 = (int)delta_x[pos] * (int)delta_x[pos];
          sq2 = (int)delta_y[pos] * (int)delta_y[pos];
-         (*magnitude)[pos] = (short)(0.5 + sqrt((float)sq1 + (float)sq2));
+         tempbuffer [index] = (short)(0.5 + sqrt((float)sq1 + (float)sq2));
+         pos ++;
+         index ++;
       }
    }
-	tfin2 = MPI_Wtime ();
-    printf ("----------------------> magnitude_x_y demoro: %f\n", tfin2 - tini2);
+   printf (">rank:%d termino magnitude\n", rank);
+   MPI_Barrier (MPI_COMM_WORLD);
+   if (rank == 0) tini3 = MPI_Wtime ();
+   MPI_Allgather (tempbuffer, rows*cols/size, MPI_SHORT, *magnitude, rows*cols/size, MPI_SHORT, MPI_COMM_WORLD);
+   
+   if (rank == 0) {
+		tfin3 = MPI_Wtime ();
+		printf (">>>Allgather demoro: %f\n", tfin3 - tini3);
+	}
+	free (tempbuffer);
+   if (rank == 0) {
+		tfin2 = MPI_Wtime ();
+	    printf ("----------------------> magnitude_x_y demoro: %f\n", tfin2 - tini2);
+	}
 }
 
 /*******************************************************************************
