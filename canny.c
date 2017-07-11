@@ -219,26 +219,26 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
 	      fclose(fpdir);
 	      free(dir_radians);
 	   }
-	
-	   /****************************************************************************
-	   * Compute the magnitude of the gradient.
-	   ****************************************************************************/
-	   if(VERBOSE) printf("Computing the magnitude of the gradient.\n");
    }
+	
+   /****************************************************************************
+   * Compute the magnitude of the gradient.
+   ****************************************************************************/
+   if(VERBOSE && rank==0) printf("Computing the magnitude of the gradient.\n");
    magnitude_x_y(delta_x, delta_y, rows, cols, &magnitude);
+	
+   /****************************************************************************
+   * Perform non-maximal suppression.
+   ****************************************************************************/
+   if(VERBOSE && rank==0) printf("Doing the non-maximal suppression.\n");
+   if((nms = (unsigned char *) calloc(rows*cols,sizeof(unsigned char)))==NULL){
+      fprintf(stderr, "Error allocating the nms image.\n");
+      exit(1);
+   }
+
+   non_max_supp(magnitude, delta_x, delta_y, rows, cols, nms);
    
-   if (rank == 0 ) {
-	
-	   /****************************************************************************
-	   * Perform non-maximal suppression.
-	   ****************************************************************************/
-	   if(VERBOSE) printf("Doing the non-maximal suppression.\n");
-	   if((nms = (unsigned char *) calloc(rows*cols,sizeof(unsigned char)))==NULL){
-	      fprintf(stderr, "Error allocating the nms image.\n");
-	      exit(1);
-	   }
-	
-	   non_max_supp(magnitude, delta_x, delta_y, rows, cols, nms);
+   if (rank == 0) {
 	
 	   /****************************************************************************
 	   * Use hysteresis to mark the edge pixels.
@@ -407,6 +407,7 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
 {
 	double tini3, tfin3, tini4, tfin4;	/* para medir tiempos de funciones */
 	short int * tempbuffer;				/* buffer temporal para x-derivative */
+	int index;							/* indice para recorrer tempbuffer */
 	short int * tempbuffer2;			/* buffer temporal para y-derivative */
    int r, c, pos;
 
@@ -442,14 +443,20 @@ void derrivative_x_y(short int *smoothedim, int rows, int cols,
 	   ****************************************************************************/
 	   if(VERBOSE) printf("   Computing the X-direction derivative.\n");
    }
+   /* se inicializa el indice para el buffer temporal */
+   index = 0;
+   
    for (r=rank*rows/size;r<(rank+1)*rows/size;r++) {
       pos = r * cols;
-      tempbuffer [pos] = smoothedim[pos+1] - smoothedim[pos];
+      tempbuffer [index] = smoothedim[pos+1] - smoothedim[pos];
       pos++;
+      index ++;
       for(c=1;c<(cols-1);c++,pos++){
-         tempbuffer [pos] = smoothedim[pos+1] - smoothedim[pos-1];
+         tempbuffer [index] = smoothedim[pos+1] - smoothedim[pos-1];
+         index ++;
       }
-      tempbuffer [pos] = smoothedim[pos] - smoothedim[pos-1];
+      tempbuffer [index] = smoothedim[pos] - smoothedim[pos-1];
+      index ++;
    }
    printf (">rank:%d termino derivative x\n", rank);
    MPI_Barrier (MPI_COMM_WORLD);
@@ -823,18 +830,24 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
 void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
     unsigned char *result) 
 {
+	double tini3, tfin3;				/* para medir tiempos de funciones */
+	short int val1, val2;				/* para inicio y fin de bucle for */
+	unsigned char *tempbuffer;			/* buffer temporal */
+	int index;							/* indice del tempbuffer */
     int rowcount, colcount,count;
     short *magrowptr,*magptr;
     short *gxrowptr,*gxptr;
     short *gyrowptr,*gyptr,z1,z2;
     short m00,gx,gy;
     float mag1,mag2,xperp,yperp;
-    unsigned char *resultrowptr, *resultptr;
+    //unsigned char *resultrowptr, *resultptr;	/* no se utilizan */
     
 	tini2 = MPI_Wtime ();
    /****************************************************************************
    * Zero the edges of the result image.
    ****************************************************************************/
+   /* no es necesario ya que no se usan estos arreglos */
+   /*
     for(count=0,resultrowptr=result,resultptr=result+ncols*(nrows-1); 
         count<ncols; resultptr++,resultrowptr++,count++){
         *resultrowptr = *resultptr = (unsigned char) 0;
@@ -844,21 +857,50 @@ void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
         count<nrows; count++,resultptr+=ncols,resultrowptr+=ncols){
         *resultptr = *resultrowptr = (unsigned char) 0;
     }
+    */
+    
+    /* se asigna memoria al buffer temporal */
+    if ((tempbuffer = (unsigned char *) calloc (nrows*ncols, sizeof (unsigned char))) == NULL) {
+		fprintf (stderr, "Error allocating the tempbuffer.\n");
+		exit (1);
+	}
 
    /****************************************************************************
    * Suppress non-maximum points.
    ****************************************************************************/
-   for(rowcount=1,magrowptr=mag+ncols+1,gxrowptr=gradx+ncols+1,
-      gyrowptr=grady+ncols+1,resultrowptr=result+ncols+1;
-      rowcount<nrows-2; 
-      rowcount++,magrowptr+=ncols,gyrowptr+=ncols,gxrowptr+=ncols,
-      resultrowptr+=ncols){   
-      for(colcount=1,magptr=magrowptr,gxptr=gxrowptr,gyptr=gyrowptr,
-         resultptr=resultrowptr;colcount<ncols-2; 
-         colcount++,magptr++,gxptr++,gyptr++,resultptr++){   
+   /* se asignan los valores para inicio y fin de bucle */
+   val1 = 0;
+   val2 = 0;
+   if (rank == 0) {
+	   val1 = 1;
+   }
+   if (rank == size-1) {
+	   val2 = 2;
+   }
+   
+   /* se inicializan las variables dependiendo del rank */
+   if (rank == 0) {
+		magrowptr=mag+ncols+1;
+		gxrowptr=gradx+ncols+1;
+		gyrowptr=grady+ncols+1;
+		index=ncols+1;
+	}
+	else {
+	   magrowptr=mag+ncols*rank*nrows/size+1;
+	   gxrowptr=gradx+ncols*rank*nrows/size+1;
+	   gyrowptr=grady+ncols*rank*nrows/size+1;
+	   index=ncols*rank*nrows/size+1;
+   }
+   
+   for(rowcount=val1+rank*nrows/size;
+      rowcount<(rank+1)*nrows/size-val2;
+      rowcount++){
+      for(colcount=1,magptr=magrowptr,gxptr=gxrowptr,gyptr=gyrowptr;
+         colcount<ncols-2;
+         colcount++,magptr++,gxptr++,gyptr++,index++){
          m00 = *magptr;
          if(m00 == 0){
-            *resultptr = (unsigned char) NOEDGE;
+            tempbuffer[index] = (unsigned char) NOEDGE;
          }
          else{
             xperp = -(gx = *gxptr)/((float)m00);
@@ -1006,19 +1048,35 @@ void non_max_supp(short *mag, short *gradx, short *grady, int nrows, int ncols,
 
             if ((mag1 > 0.0) || (mag2 > 0.0))
             {
-                *resultptr = (unsigned char) NOEDGE;
+                tempbuffer[index] = (unsigned char) NOEDGE;
             }
             else
             {    
                 if (mag2 == 0.0)
-                    *resultptr = (unsigned char) NOEDGE;
+                    tempbuffer[index] = (unsigned char) NOEDGE;
                 else
-                    *resultptr = (unsigned char) POSSIBLE_EDGE;
+                    tempbuffer[index] = (unsigned char) POSSIBLE_EDGE;
             }
-        } 
+        }
+        /* se incrementan las variables */
+        magrowptr+=ncols;
+        gyrowptr+=ncols;
+        gxrowptr+=ncols;
+        index+=3;
     }
-    tfin2 = MPI_Wtime ();
-    printf ("----------------------> non_max_supp demoro: %f\n", tfin2 - tini2);
+    
+    printf (">rank:%d termino supp no max\n", rank);
+    if (rank == 0) tini3 = MPI_Wtime ();
+    MPI_Allreduce (tempbuffer, result, nrows*ncols, MPI_UNSIGNED_CHAR, MPI_SUM, MPI_COMM_WORLD);
+    if (rank == 0) {
+		tfin3 = MPI_Wtime ();
+		printf (">>>Allreduce demoro: %f\n", tfin3 - tini3);
+	}
+	free (tempbuffer);
+	if (rank == 0) {
+		tfin2 = MPI_Wtime ();
+		printf ("----------------------> non_max_supp demoro: %f\n", tfin2 - tini2);
+	}
 }
 //<------------------------- end hysteresis.c ------------------------->
 
