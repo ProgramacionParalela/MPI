@@ -237,30 +237,27 @@ void canny(unsigned char *image, int rows, int cols, float sigma,
    }
 
    non_max_supp(magnitude, delta_x, delta_y, rows, cols, nms);
-   
-   if (rank == 0) {
 	
-	   /****************************************************************************
-	   * Use hysteresis to mark the edge pixels.
-	   ****************************************************************************/
-	   if(VERBOSE) printf("Doing hysteresis thresholding.\n");
-	   if((*edge=(unsigned char *)calloc(rows*cols,sizeof(unsigned char))) ==NULL){
-	      fprintf(stderr, "Error allocating the edge image.\n");
-	      exit(1);
-	   }
-	
-	   apply_hysteresis(magnitude, nms, rows, cols, tlow, thigh, *edge);
-	
-	   /****************************************************************************
-	   * Free all of the memory that we allocated except for the edge image that
-	   * is still being used to store out result.
-	   ****************************************************************************/
-	   free(smoothedim);
-	   free(delta_x);
-	   free(delta_y);
-	   free(magnitude);
-	   free(nms);
+   /****************************************************************************
+   * Use hysteresis to mark the edge pixels.
+   ****************************************************************************/
+   if(VERBOSE && rank==0) printf("Doing hysteresis thresholding.\n");
+   if((*edge=(unsigned char *)calloc(rows*cols,sizeof(unsigned char))) ==NULL){
+      fprintf(stderr, "Error allocating the edge image.\n");
+      exit(1);
    }
+
+   apply_hysteresis(magnitude, nms, rows, cols, tlow, thigh, *edge);
+
+   /****************************************************************************
+   * Free all of the memory that we allocated except for the edge image that
+   * is still being used to store out result.
+   ****************************************************************************/
+   free(smoothedim);
+   free(delta_x);
+   free(delta_y);
+   free(magnitude);
+   free(nms);
 }
 
 /*******************************************************************************
@@ -721,11 +718,20 @@ void follow_edges(unsigned char *edgemapptr, short *edgemagptr, short lowval,
 void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
 	float tlow, float thigh, unsigned char *edge)
 {
+	double tini3, tfin3;			/* para medir tiempos de funciones */
+	unsigned char *tempbuffer;		/* buffer temporal */
+	int temphist[32768];			/* arreglo temporal de hist */
    int r, c, pos, numedges, lowcount, highcount, lowthreshold, highthreshold,
        i, hist[32768], rr, cc;
    short int maximum_mag, sumpix;
 
-	tini2 = MPI_Wtime ();
+	if (rank == 0) tini2 = MPI_Wtime ();
+	
+	/* se asigna memoria al buffer temporal */
+	if ((tempbuffer = (unsigned char *) calloc (rows*cols, sizeof (unsigned char))) == NULL) {
+		fprintf (stderr, "Error allocating the tempbuffer.\n");
+		exit (1);
+	}
    /****************************************************************************
    * Initialize the edge map to possible edges everywhere the non-maximal
    * suppression suggested there could be an edge except for the border. At
@@ -733,37 +739,45 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    * follow_edges algorithm more efficient to not worry about tracking an
    * edge off the side of the image.
    ****************************************************************************/
-   for(r=0,pos=0;r<rows;r++){
+   /* interesa solo el primer bucle debido al tiempo que consume */
+   pos = rank*rows*cols/size;
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
       for(c=0;c<cols;c++,pos++){
-	 if(nms[pos] == POSSIBLE_EDGE) edge[pos] = POSSIBLE_EDGE;
-	 else edge[pos] = NOEDGE;
+	 if(nms[pos] == POSSIBLE_EDGE) tempbuffer[pos] = POSSIBLE_EDGE;
+	 else tempbuffer[pos] = NOEDGE;
       }
    }
-
+	/* lo hacen todos los nodos */
    for(r=0,pos=0;r<rows;r++,pos+=cols){
-      edge[pos] = NOEDGE;
-      edge[pos+cols-1] = NOEDGE;
+      tempbuffer[pos] = NOEDGE;
+      tempbuffer[pos+cols-1] = NOEDGE;
    }
    pos = (rows-1) * cols;
    for(c=0;c<cols;c++,pos++){
-      edge[c] = NOEDGE;
-      edge[pos] = NOEDGE;
+      tempbuffer[c] = NOEDGE;
+      tempbuffer[pos] = NOEDGE;
    }
 
    /****************************************************************************
    * Compute the histogram of the magnitude image. Then use the histogram to
    * compute hysteresis thresholds.
    ****************************************************************************/
-   for(r=0;r<32768;r++) hist[r] = 0;
-   for(r=0,pos=0;r<rows;r++){
+   /* interesa paralelizar solo el segundo for */
+   for(r=0;r<32768;r++) temphist[r] = 0;
+   pos = rank*rows*cols/size;
+   /* cada nodo dispone de la informacion a la que accede en tempbuffer */
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
       for(c=0;c<cols;c++,pos++){
-	 if(edge[pos] == POSSIBLE_EDGE) hist[mag[pos]]++;
+	 if(tempbuffer[pos] == POSSIBLE_EDGE) temphist[mag[pos]]++;
       }
    }
+   /* se comparte la informacion de hist */
+   MPI_Allreduce (temphist, hist, 32768, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
    /****************************************************************************
    * Compute the number of pixels that passed the nonmaximal suppression.
    ****************************************************************************/
+   /* lo realizan todos los nodos */
    for(r=1,numedges=0;r<32768;r++){
       if(hist[r] != 0) maximum_mag = r;
       numedges += hist[r];
@@ -781,6 +795,7 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    * to one." That means that in terms of this implementation, we should
    * choose tlow ~= 0.5 or 0.33333.
    ****************************************************************************/
+   /* lo realizan todos los nodos */
    r = 1;
    numedges = hist[1];
    while((r<(maximum_mag-1)) && (numedges < highcount)){
@@ -790,7 +805,7 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    highthreshold = r;
    lowthreshold = (int)(highthreshold * tlow + 0.5);
 
-   if(VERBOSE){
+   if(VERBOSE && rank==0){
       printf("The input low and high fractions of %f and %f computed to\n",
 	 tlow, thigh);
       printf("magnitude of the gradient threshold values of: %d %d\n",
@@ -801,11 +816,13 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    * This loop looks for pixels above the highthreshold to locate edges and
    * then calls follow_edges to continue the edge.
    ****************************************************************************/
-   for(r=0,pos=0;r<rows;r++){
+   /* se paraleliza */
+   pos = rank*rows*cols/size;
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
       for(c=0;c<cols;c++,pos++){
-	 if((edge[pos] == POSSIBLE_EDGE) && (mag[pos] >= highthreshold)){
-            edge[pos] = EDGE;
-            follow_edges((edge+pos), (mag+pos), lowthreshold, cols);
+	 if((tempbuffer[pos] == POSSIBLE_EDGE) && (mag[pos] >= highthreshold)){
+            tempbuffer[pos] = EDGE;
+            follow_edges((tempbuffer+pos), (mag+pos), lowthreshold, cols);
 	 }
       }
    }
@@ -813,11 +830,21 @@ void apply_hysteresis(short int *mag, unsigned char *nms, int rows, int cols,
    /****************************************************************************
    * Set all the remaining possible edges to non-edges.
    ****************************************************************************/
-   for(r=0,pos=0;r<rows;r++){
-      for(c=0;c<cols;c++,pos++) if(edge[pos] != EDGE) edge[pos] = NOEDGE;
+   /* se paraleliza */
+   pos = rank*rows*cols/size;
+   for(r=rank*rows/size;r<(rank+1)*rows/size;r++){
+      for(c=0;c<cols;c++,pos++) if(tempbuffer[pos] != EDGE) tempbuffer[pos] = NOEDGE;
    }
-   tfin2 = MPI_Wtime ();
-   printf ("----------------------> apply_hysteresis demoro: %f\n", tfin2 - tini2);
+   
+   printf (">rank:%d termino hysteresis\n", rank);
+   if (rank == 0) tini3 = MPI_Wtime ();
+   MPI_Reduce (tempbuffer, edge, rows*cols, MPI_UNSIGNED_CHAR, MPI_SUM, 0, MPI_COMM_WORLD);
+   free (tempbuffer);
+   if (rank == 0) {
+	   tfin2 = MPI_Wtime ();
+	   printf (">>>Reduce demoro: %f\n", tfin2 - tini3);
+	   printf ("----------------------> apply_hysteresis demoro: %f\n", tfin2 - tini2);
+   }
 }
 
 /*******************************************************************************
